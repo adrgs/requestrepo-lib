@@ -67,7 +67,7 @@ from requestrepo import Requestrepo
 
 client = Requestrepo(token="your_api_token")
 
-for request in client.get_all_requests():
+for request in client.get_old_requests():
     print("Request:", request)
 
 client.delete_all_requests() # clear all requests on the server
