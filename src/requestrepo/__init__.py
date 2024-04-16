@@ -36,7 +36,6 @@ class Requestrepo:
         protocol: Protocol to use ('https' or 'http', default: 'https').
         verify: Whether to verify SSL certificates (default: True).
     """
-    info: bool = not not token
 
     self.__host = host
     self.__port = port
@@ -45,6 +44,8 @@ class Requestrepo:
 
     if not token:
       token = os.environ.get("REQUESTREPO_TOKEN")
+
+    info: bool = not token
 
     if not token:
       token = requests.post(f"{protocol}://{host}:{port}/api/get_token", verify=verify).json()["token"]
