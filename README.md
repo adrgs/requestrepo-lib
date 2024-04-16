@@ -1,16 +1,16 @@
-## requestrepo Python client
+# requestrepo Python client
 
 Python bindings to automate requestrepo.com
 
-**Installation**
+## Installation
 
 ```bash
 pip install requestrepo
 ```
 
-**Basic Usage**
+## Basic Usage
 
-1. **Instantiate the `Requestrepo` class:**
+**Instantiate the `Requestrepo` class:**
 
 ```python
 from requestrepo import Requestrepo  # Requestrepo, RequestRepo and requestrepo are accepted imports
@@ -19,13 +19,13 @@ client = Requestrepo() # if token is not provided via the constructor or REQUEST
 client = Requestrepo("your-token-here")
 ```
 
-or
+or via environment variables:
 
 ```bash
 REQUESTREPO_TOKEN=token python your_script.py
 ```
 
-**Examples**
+## Examples
 
 **Example 1: Async request retrieval via `on_request`**
 
@@ -52,10 +52,10 @@ new_request = client.get_request()
 print("Latest Request:", new_request)
 ```
 
-**Contributing**
+## Contributing
 
 Contributions are welcome! Please submit a pull request or open an issue if you have any ideas or suggestions.
 
-**License**
+## License
 
 MIT
