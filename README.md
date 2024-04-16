@@ -58,6 +58,21 @@ new_request = client.get_request()
 print("Latest Request:", new_request)
 ```
 
+**Example 3: Retrieve old requests**
+
+You can iterate over all requests that are stored on the server:
+
+```python
+from requestrepo import Requestrepo
+
+client = Requestrepo(token="your_api_token")
+
+for request in client.get_all_requests():
+    print("Request:", request)
+
+client.delete_all_requests() # clear all requests on the server
+```
+
 ## Contributing
 
 Contributions are welcome! Please submit a pull request or open an issue if you have any ideas or suggestions.
