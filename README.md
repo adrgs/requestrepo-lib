@@ -37,6 +37,9 @@ def on_request(request_data: dict):
 
 client = Requestrepo(token="your-token-here")
 
+print(client.subdomain) # abcd1234
+print(client.domain) # abcd1234.requestrepo.com
+
 client.await_requests()
 ```
 
@@ -46,6 +49,9 @@ client.await_requests()
 from requestrepo import Requestrepo
 
 client = Requestrepo(token="your_api_token")
+
+print(client.subdomain) # abcd1234
+print(client.domain) # abcd1234.requestrepo.com
 
 # Get the latest request (blocks until one is received)
 new_request = client.get_request()
