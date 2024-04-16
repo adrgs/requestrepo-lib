@@ -15,7 +15,7 @@ pip install requestrepo
 ```python
 from requestrepo import Requestrepo  # Requestrepo, RequestRepo and requestrepo are accepted imports
 
-client = Requestrepo() # if token is not provided via the constructor or REQUESTREPO_TOKEN environment variable, a new one will be generated and printed to stderr
+client = Requestrepo() # new token printed to console
 client = Requestrepo("your-token-here")
 ```
 
