@@ -190,6 +190,70 @@ class Requestrepo:
     r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/update_file?token={self.__token}", json=data, verify=self.__verify)
     return r.status_code == 200
 
+  def dns(self) -> List[Dict]:
+    """
+    Returns a dictionary containing the DNS data.
+    """
+    r = requests.get(f"{self.__protocol}://{self.__host}:{self.__port}/api/get_dns?token={self.__token}", verify=self.__verify)
+    return r.json()
+
+  def update_dns(self, dns: List[Dict]) -> bool:
+    """
+    Updates the DNS data on remote.
+    """
+    r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/update_dns?token={self.__token}", json={"records":dns}, verify=self.__verify)
+    return r.status_code == 200
+
+  def add_dns(self, subsubdomain: str, dnstype: Union[int, str], value: str) -> bool:
+    """
+    Adds a DNS record to the remote.
+    """
+    dns_types = ["A", "AAAA", "CNAME", "TXT"]
+    records = self.dns()
+
+    # if dns entry already exists for same subsubdomain and dnstype, update it
+    # otherwise, add a new entry
+    for record in records:
+      if record["subsubdomain"] == subsubdomain and record["type"] == dnstype:
+        record["value"] = value
+        return self.update_dns(records)
+
+    if type(dnstype) == str:
+      dnstype = dns_types.index(dnstype)
+      if dnstype == -1:
+        raise ValueError(f"Invalid DNS type: {dnstype}. Must be one of {dns_types}")
+    elif type(dnstype) == int and (dnstype < 0 or dnstype > len(dns_types)):
+      raise ValueError(f"Invalid DNS type: {dnstype}. Must be between 0 and {len(dns_types)-1}")
+
+    records.append({"domain":subsubdomain, "type":dnstype, "value":value})
+
+    return self.update_dns(records)
+
+
+  def remove_dns(self, subsubdomain: str, dnstype: Union[int, str, None]) -> bool:
+    """
+    Removes a DNS record from the remote.
+    """
+    dns_types = ["A", "AAAA", "CNAME", "TXT"]
+
+    records = self.dns()
+
+    if type(dnstype) == str:
+      dnstype = dns_types.index(dnstype)
+      if dnstype == -1:
+        raise ValueError(f"Invalid DNS type: {dnstype}. Must be one of {dns_types}")
+    elif type(dnstype) == int and (dnstype < 0 or dnstype > len(dns_types)):
+      raise ValueError(f"Invalid DNS type: {dnstype}. Must be between 0 and {len(dns_types)-1}")
+
+    prev_len = len(records)
+
+    records = [record for record in records if record["domain"] != subsubdomain and (dnstype == None or record["type"] != dnstype)]
+
+    if len(records) == prev_len:
+      return False
+
+    return self.update_dns(records)
+
 
 RequestRepo = Requestrepo
 requestrepo = Requestrepo
