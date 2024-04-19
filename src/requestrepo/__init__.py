@@ -214,7 +214,7 @@ class Requestrepo:
     # if dns entry already exists for same subsubdomain and dnstype, update it
     # otherwise, add a new entry
     for record in records:
-      if record["subsubdomain"] == subsubdomain and record["type"] == dnstype:
+      if record["domain"] == subsubdomain and record["type"] == dnstype:
         record["value"] = value
         return self.update_dns(records)
 
