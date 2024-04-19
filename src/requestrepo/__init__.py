@@ -156,6 +156,40 @@ class Requestrepo:
     r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/delete_all_requests?token={self.__token}", verify=self.__verify)
     return r.status_code == 200
 
+  def response(self) -> Dict:
+    """
+    Returns a dictionary containing the response data.
+    """
+    r = requests.get(f"{self.__protocol}://{self.__host}:{self.__port}/api/get_file?token={self.__token}", verify=self.__verify)
+    data = r.json()
+    data["raw"] = base64.b64decode(data["raw"])
+    # normalize list of headers to dictionary
+    data["headers"] = {h["header"]:h["value"] for h in data["headers"]}
+
+    return data
+
+  def update_response(self, headers: Union[Dict, None] = None, raw: Union[bytes, None] = None, status_code: Union[int, None] = None) -> bool:
+    """
+    Updates the response data on remote.
+    If a value is not provided, it will not be updated.
+    """
+    data = self.response()
+
+    if headers:
+      data["headers"] = headers
+    if raw:
+      data["raw"] = raw
+    if status_code:
+      data["status_code"] = status_code
+
+    data["raw"] = base64.b64encode(data["raw"]).decode()
+
+    # normalize dictionary of headers to list
+    data["headers"] = [{"header":k, "value":v} for k,v in data["headers"].items()]
+
+    r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/update_file?token={self.__token}", json=data, verify=self.__verify)
+    return r.status_code == 200
+
 
 RequestRepo = Requestrepo
 requestrepo = Requestrepo
