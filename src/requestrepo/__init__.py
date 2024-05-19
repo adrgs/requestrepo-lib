@@ -80,6 +80,10 @@ class Requestrepo:
 
     self.__old_requests = json.loads(loop.run_until_complete(self.__websocket.recv()))["data"]
 
+  @property
+  def token(self) -> str:
+    return self.__token
+
   def on_request(self, data: Union[HttpRequest, DnsRequest]):
     """
     Callback function for handling new incoming requests. **Override this in your code.**
