@@ -1,14 +1,14 @@
 import os
 import jwt
-import sys
 import json
 import base64
 import asyncio
+import logging
 import requests
 from websockets.client import connect
 from typing import Union, Dict, List, Callable, Optional
 from jwt.exceptions import DecodeError
-from models import HttpRequest, DnsRequest, HttpResponse, DnsRecord
+from .models import HttpRequest, DnsRequest, HttpResponse, DnsRecord
 
 class Requestrepo:
   """
@@ -60,7 +60,8 @@ class Requestrepo:
       subdomain: str = jwt.decode(token, verify=False)["subdomain"]
 
     if info:
-      print(f"[+] Running on {subdomain}.{host} with token: {token}", file=sys.stderr)
+      logger = logging.getLogger(__name__)
+      logger.info(f"Running on {subdomain}.{host} with token: {token}")
 
     self.__token = token
     self.subdomain = subdomain
