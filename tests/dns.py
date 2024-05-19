@@ -1,6 +1,5 @@
 import unittest
 import requestrepo
-import requests
 import socket
 
 class TestRequest(unittest.TestCase):
