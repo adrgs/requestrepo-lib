@@ -32,7 +32,7 @@ REQUESTREPO_TOKEN=token python your_script.py
 ```python
 from requestrepo import Requestrepo
 
-def on_request(request_data: dict):
+def on_request(request_data):
    print("New Request Received:", request_data)
 
 client = Requestrepo(token="your-token-here")
@@ -71,6 +71,25 @@ for request in client.get_old_requests():
     print("Request:", request)
 
 client.delete_all_requests() # clear all requests on the server
+```
+
+**Example 4: Update HTTP response**
+
+You can update the response of a request by calling `update_http` method:
+
+```python
+from requestrepo import Requestrepo # pip install requestrepo
+
+client = Requestrepo(token="your_api_token")
+
+print(client.subdomain) # abcd1234
+print(client.domain) # abcd1234.requestrepo.com
+
+client.update_http(raw=b"hello world")
+
+# Get the latest request (blocks until one is received)
+new_request = client.get_request()
+print("Latest Request:", new_request)
 ```
 
 ## Contributing
