@@ -78,7 +78,18 @@ class Requestrepo:
     self.__websocket = loop.run_until_complete(connect(f"{wsp}://{host}:{port}/api/ws"))
     loop.run_until_complete(self.__websocket.send(token))
 
-    self.__old_requests = json.loads(loop.run_until_complete(self.__websocket.recv()))["data"]
+    self.__old_requests = []
+    old_requests = json.loads(loop.run_until_complete(self.__websocket.recv()))["data"]
+    for i in range(len(old_requests)):
+      data = json.loads(old_requests[i])
+      request = None
+      if data["type"] == "http":
+        request = HttpRequest(**data)
+      elif data["type"] == "dns":
+        request = DnsRequest(**data)
+      
+      if request:
+        self.__old_requests.append(request)
 
   @property
   def token(self) -> str:
