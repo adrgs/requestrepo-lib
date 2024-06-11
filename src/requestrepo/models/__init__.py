@@ -9,7 +9,7 @@ else:
 
 
 class HttpRequest(BaseModel):
-  _id: str
+  id: str = Field(..., alias='_id')
   type: str
   raw: bytes
   uid: str
@@ -27,7 +27,7 @@ class HttpRequest(BaseModel):
 
 
 class DnsRequest(BaseModel):
-  _id: str
+  id: str = Field(..., alias='_id')
   type: str
   raw: bytes
   uid: str
