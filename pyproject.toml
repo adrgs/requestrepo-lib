@@ -4,23 +4,93 @@ build-backend = "hatchling.build"
 
 [project]
 name = "requestrepo"
-version = "0.1.2"
-authors = [{ name = "Dragos Albastroiu", email = "adragos@protonmail.com" }]
-description = "Python bindings to automate requestrepo.com"
+version = "2.0.0"
+description = "Python client library for requestrepo v2 API"
 readme = "README.md"
-requires-python = ">=3.8"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "RequestRepo Team" }
+]
+keywords = [
+    "requestrepo",
+    "http",
+    "dns",
+    "smtp",
+    "security",
+    "pentesting",
+    "request-capture",
+]
 classifiers = [
-  "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent",
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Security",
+    "Typing :: Typed",
 ]
 dependencies = [
-  "PyJWT",
-  "requests",
-  "websockets",
-  "pydantic",
+    "requests>=2.28.0",
+    "websockets>=12.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "types-requests>=2.28.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/adrgs/requestrepo-lib"
-Issues = "https://github.com/adrgs/requestrepo-lib/issues"
+Homepage = "https://requestrepo.com"
+Repository = "https://github.com/adrgs/requestrepo"
+Documentation = "https://github.com/adrgs/requestrepo#readme"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/requestrepo"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "D",   # pydocstyle
+]
+ignore = [
+    "D100",  # Missing docstring in public module
+    "D104",  # Missing docstring in public package
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "websockets.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

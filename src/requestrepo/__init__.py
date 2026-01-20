@@ -1,321 +1,761 @@
-import os
-import jwt
-import json
-import base64
+"""Requestrepo Python client library for the v2 API.
+
+This module provides a Python client for interacting with requestrepo,
+an HTTP/DNS/SMTP request analysis tool. It supports real-time request
+streaming via WebSocket and REST API operations.
+
+Example:
+    Basic usage::
+
+        from requestrepo import Requestrepo
+
+        repo = Requestrepo()
+        print(f"Your subdomain: {repo.subdomain}.{repo.domain}")
+
+    Real-time streaming::
+
+        class MyRepo(Requestrepo):
+            def on_request(self, req):
+                print(f"Received {req.type} request from {req.ip}")
+
+        repo = MyRepo()
+        repo.await_requests()
+"""
+
 import asyncio
-import logging
+import base64
+import json
+import threading
+from typing import Callable, Union
+
 import requests
-from websockets.client import connect
-from typing import Union, Dict, List, Callable, Optional
-from jwt.exceptions import DecodeError
-from .models import HttpRequest, DnsRequest, HttpResponse, DnsRecord
+from websockets.sync.client import connect
+
+from .models import (
+    DnsRecord,
+    DnsRequest,
+    Header,
+    HttpRequest,
+    Response,
+    SmtpRequest,
+    TcpRequest,
+)
+
+# Type alias for any request type
+AnyRequest = Union[HttpRequest, DnsRequest, SmtpRequest, TcpRequest]
+
 
 class Requestrepo:
-  """
-  Class for interacting with the Requestrepo API. Provides real-time request monitoring,
-  historical request retrieval, and the ability to delete requests.
-  """
+    """Client for the requestrepo v2 API.
 
-  __old_requests: List[Union[HttpRequest, DnsRequest]] = []
-  __queue: List[Union[HttpRequest, DnsRequest]] = []
+    This class provides methods to interact with requestrepo for capturing
+    and analyzing HTTP, DNS, SMTP, and TCP requests. It supports both
+    synchronous REST API calls and real-time WebSocket streaming.
 
-  def __init__(
+    Attributes:
+        subdomain: The unique subdomain assigned to this session.
+        domain: The base domain of the requestrepo instance.
+
+    Args:
+        token: Existing JWT token to use. If not provided, a new session is created.
+        admin_token: Admin token for creating sessions on protected instances.
+        host: Hostname of the requestrepo instance.
+        port: Port number of the requestrepo instance.
+        protocol: Protocol to use ('http' or 'https').
+        verify: Whether to verify SSL certificates.
+
+    Raises:
+        requests.HTTPError: If session creation fails.
+    """
+
+    def __init__(
         self,
-        token: Union[str, None] = None,
+        token: str | None = None,
+        admin_token: str | None = None,
         host: str = "requestrepo.com",
         port: int = 443,
-        protocol: str = 'https',
-        verify: bool = True
+        protocol: str = "https",
+        verify: bool = True,
     ) -> None:
-    """
-    Initializes the Requestrepo client.
+        """Initialize the requestrepo client.
 
-    Args:
-        token: Optional API token. If not provided, attempts to fetch it from
-                the REQUESTREPO_TOKEN environment variable or by calling the API.
-        host: Hostname of the Requestrepo server (default: "requestrepo.com").
-        port: Port of the Requestrepo server (default: 443).
-        protocol: Protocol to use ('https' or 'http', default: 'https').
-        verify: Whether to verify SSL certificates (default: True).
-    """
+        Creates a new session if no token is provided. The session provides
+        a unique subdomain for capturing requests.
+        """
+        self.__host = host
+        self.__port = port
+        self.__protocol = protocol
+        self.__verify = verify
+        self.__websocket = None
+        self.__ws_thread = None
+        self.__ws_running = False
+        self.__request_queue: list[AnyRequest] = []
+        self.__request_event = threading.Event()
 
-    self.__host = host
-    self.__port = port
-    self.__protocol = protocol
-    self.__verify = verify
+        if not token:
+            body: dict = {}
+            if admin_token:
+                body["admin_token"] = admin_token
+            resp = requests.post(
+                f"{protocol}://{host}:{port}/api/v2/sessions",
+                json=body,
+                verify=verify,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            token = data["token"]
+            self.__subdomain = data["subdomain"]
+        else:
+            # Extract subdomain from token by decoding JWT payload
+            self.__subdomain = self._extract_subdomain_from_token(token)
 
-    if not token:
-      token = os.environ.get("REQUESTREPO_TOKEN")
+        self.__token = token
 
-    info: bool = not token
+    def _extract_subdomain_from_token(self, token: str) -> str:
+        """Extract the subdomain from a JWT token.
 
-    if not token:
-      token = requests.post(f"{protocol}://{host}:{port}/api/get_token", verify=verify).json()["token"]
+        Args:
+            token: The JWT token to decode.
 
-    assert(token is not None)
+        Returns:
+            The subdomain extracted from the token payload.
+        """
+        try:
+            # JWT is base64url encoded: header.payload.signature
+            payload = token.split(".")[1]
+            # Add padding if needed
+            padding = 4 - len(payload) % 4
+            if padding != 4:
+                payload += "=" * padding
+            decoded = base64.urlsafe_b64decode(payload)
+            data = json.loads(decoded)
+            return data.get("subdomain", "")
+        except (IndexError, ValueError, json.JSONDecodeError):
+            return ""
 
-    try:
-      subdomain: str = jwt.decode(token, options={"verify_signature": False})["subdomain"]
-    except DecodeError:
-      subdomain: str = jwt.decode(token, verify=False)["subdomain"]
+    def _auth_headers(self) -> dict[str, str]:
+        """Get authorization headers for API requests.
 
-    if info:
-      logger = logging.getLogger(__name__)
-      logger.info(f"Running on {subdomain}.{host} with token: {token}")
+        Returns:
+            Dictionary with Bearer token authorization header.
+        """
+        return {"Authorization": f"Bearer {self.__token}"}
 
-    self.__token = token
-    self.subdomain = subdomain
-    self.domain = subdomain + "." + host
+    def _base_url(self) -> str:
+        """Get the base URL for API requests.
 
-    if "https" == protocol.lower():
-      wsp = "wss"
-    else:
-      wsp = "ws"
+        Returns:
+            The base URL including protocol, host, and port.
+        """
+        return f"{self.__protocol}://{self.__host}:{self.__port}"
 
-    self.__on_request_callback = self.on_request
+    @property
+    def subdomain(self) -> str:
+        """Get the subdomain assigned to this session.
 
-    loop = asyncio.get_event_loop()
-    self.__websocket = loop.run_until_complete(connect(f"{wsp}://{host}:{port}/api/ws"))
-    loop.run_until_complete(self.__websocket.send(token))
+        Returns:
+            The unique subdomain string.
+        """
+        return self.__subdomain
 
-    self.__old_requests = []
-    old_requests = json.loads(loop.run_until_complete(self.__websocket.recv()))["data"]
-    for i in range(len(old_requests)):
-      data = json.loads(old_requests[i])
-      request = None
-      if data["type"] == "http":
-        request = HttpRequest(**data)
-      elif data["type"] == "dns":
-        request = DnsRequest(**data)
-      
-      if request:
-        self.__old_requests.append(request)
+    @property
+    def domain(self) -> str:
+        """Get the base domain of the requestrepo instance.
 
-  @property
-  def token(self) -> str:
-    return self.__token
+        Returns:
+            The base domain string.
+        """
+        return self.__host
 
-  def on_request(self, data: Union[HttpRequest, DnsRequest]):
-    """
-    Callback function for handling new incoming requests. **Override this in your code.**
+    @property
+    def token(self) -> str:
+        """Get the JWT token for this session.
 
-    Args:
-        data: Dictionary containing the request data.
-    """
-    raise NotImplementedError(f"You must implement the on_request method on {self} class")
+        Returns:
+            The JWT token string.
+        """
+        return self.__token
 
-  def get_old_requests(self) -> List[Union[HttpRequest, DnsRequest]]:
-    """
-    Returns a list of previously received requests.
+    # -------------------------------------------------------------------------
+    # Request Parsing
+    # -------------------------------------------------------------------------
 
-    Returns:
-        List of dictionaries, each representing a past request.
-    """
-    return self.__old_requests
+    def _parse_request(self, data: dict) -> AnyRequest:
+        """Parse a request dictionary into the appropriate model.
 
-  @staticmethod
-  def HTTP_FILTER(request: Union[HttpRequest, DnsRequest]) -> bool:
-    return isinstance(request, HttpRequest)
+        Args:
+            data: Dictionary containing request data from the API.
 
-  @staticmethod
-  def DNS_FILTER(request: Union[HttpRequest, DnsRequest]) -> bool:
-    return isinstance(request, DnsRequest)
+        Returns:
+            The parsed request object (HttpRequest, DnsRequest, SmtpRequest, or TcpRequest).
 
-  def get_http_request(self) -> HttpRequest:
-    """
-    Synchronously gets a single new HTTP request (blocks the current thread).
+        Raises:
+            ValueError: If the request type is unknown.
+        """
+        req_type = data.get("type")
 
-    Returns:
-        Dictionary containing the request data.
-    """
-    return self.get_request(Requestrepo.HTTP_FILTER)
+        # Decode base64 raw data if present
+        if "raw" in data and isinstance(data["raw"], str):
+            data["raw"] = base64.b64decode(data["raw"])
 
-  def get_dns_request(self) -> DnsRequest:
-    """
-    Synchronously gets a single new DNS request (blocks the current thread).
+        # Decode base64 body for HTTP requests
+        if "body" in data and isinstance(data["body"], str):
+            data["body"] = base64.b64decode(data["body"])
 
-    Returns:
-        Dictionary containing the request data.
-    """
-    return self.get_request(Requestrepo.DNS_FILTER)
+        if req_type == "http":
+            return HttpRequest(**data)
+        elif req_type == "dns":
+            return DnsRequest(**data)
+        elif req_type == "smtp":
+            return SmtpRequest(**data)
+        elif req_type == "tcp":
+            return TcpRequest(**data)
+        else:
+            raise ValueError(f"Unknown request type: {req_type}")
 
-  def get_request(self, filter: Union[Callable[[Union[HttpRequest, DnsRequest]], bool], None] = None) -> Union[HttpRequest, DnsRequest]:
-    """ 
-    Synchronously gets a single new request (blocks the current thread).
+    # -------------------------------------------------------------------------
+    # DNS Operations
+    # -------------------------------------------------------------------------
 
-    Returns:
-        Dictionary containing the request data.
-    """
-    if filter and self.__queue:
-      for i, request in enumerate(self.__queue):
-        if filter(request):
-          return self.__queue.pop(i)
+    def dns(self) -> list[DnsRecord]:
+        """Get all DNS records for this session.
 
-    loop = asyncio.get_event_loop()
-    request = loop.run_until_complete(self.async_get_request())
-    while filter and not filter(request):
-      self.__queue.append(request)
-      request = loop.run_until_complete(self.async_get_request())
+        Returns:
+            List of DNS records configured for this session.
 
-    return request
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        r = requests.get(
+            f"{self._base_url()}/api/v2/dns",
+            headers=self._auth_headers(),
+            verify=self.__verify,
+        )
+        r.raise_for_status()
+        return [DnsRecord(**d) for d in r.json().get("records", [])]
 
-  async def async_get_request(self) -> Union[HttpRequest, DnsRequest]:
-    """
-    Asynchronously gets a single new request.
+    def update_dns(self, dns_records: list[DnsRecord]) -> bool:
+        """Update all DNS records for this session.
 
-    Returns:
-        Dictionary containing the request data.
-    """
-    data = json.loads(await self.__websocket.recv())["data"]
-    data = json.loads(data)
-    data["raw"] = base64.b64decode(data["raw"])
-    if data["type"] == "http":
-      data = HttpRequest(**data)
-    elif data["type"] == "dns":
-      data = DnsRequest(**data)
-    else:
-      raise ValueError(f"Invalid request type: {data['type']}")
+        Args:
+            dns_records: List of DNS records to set.
 
-    return data
+        Returns:
+            True if the update was successful, False otherwise.
+        """
+        r = requests.put(
+            f"{self._base_url()}/api/v2/dns",
+            headers=self._auth_headers(),
+            json={"records": [d.model_dump() for d in dns_records]},
+            verify=self.__verify,
+        )
+        return r.status_code == 200
 
-  async def __process_requests(self):
-      """
-      Internal function to continuously receive and process requests asynchronously.
-      """
-      while True:
-        request_data = await self.async_get_request()
-        if self.__on_request_callback:
-            self.__on_request_callback(request_data)
+    def add_dns(self, domain: str, record_type: str, value: str) -> bool:
+        """Add a DNS record to this session.
 
-  def await_requests(self) -> None:
-    """
-    Starts listening for incoming requests indefinitely (doesn't return).
-    """
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(self.__process_requests())
+        Args:
+            domain: Domain or subdomain name.
+            record_type: DNS record type (A, AAAA, CNAME, TXT).
+            value: Record value.
 
-  def delete_request(self, id: str) -> bool:
-    """
-    Deletes a request from Requestrepo.
-
-    Args:
-        id: The ID of the request to delete.
-
-    Returns:
-        True if deletion was successful, False otherwise.
-    """
-    r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/delete_request?token={self.__token}", json={"id": id}, verify=self.__verify)
-    return r.status_code == 200
-
-  def delete_all_requests(self) -> bool:
-    """
-    Deletes all requests associated with your account on Requestrepo.
-
-    Returns:
-        True if deletion was successful, False otherwise.
-    """
-    r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/delete_all_requests?token={self.__token}", verify=self.__verify)
-    return r.status_code == 200
-
-  def response(self) -> HttpResponse:
-    """
-    Returns a dictionary containing the HTTP response data.
-    """
-    r = requests.get(f"{self.__protocol}://{self.__host}:{self.__port}/api/get_file?token={self.__token}", verify=self.__verify)
-    data = r.json()
-    data["raw"] = base64.b64decode(data["raw"])
-    # normalize list of headers to dictionary
-    data["headers"] = {h["header"]:h["value"] for h in data["headers"]}
-
-    return HttpResponse(**data)
-
-  def update_http(self, response: Optional[HttpResponse] = None, raw: Optional[bytes] = None, headers: Optional[Union[List[Dict[str, str]], Dict[str, str]]] = None, status_code: Optional[int] = None) -> bool:
-    """
-    Updates the HTTP response data on remote.
-    If a value is not provided, it will not be updated.
-    """
-    data = response.model_dump() if response else self.response().model_dump()
-
-    if headers:
-      data["headers"] = headers
-    if raw:
-      data["raw"] = raw
-    if status_code:
-      data["status_code"] = status_code
-
-    data["raw"] = base64.b64encode(data["raw"]).decode()
-
-    if type(data["headers"]) == dict: # normalize dictionary of headers to list, but only when needed
-      # this allows the user to pass a list of headers if needed
-      data["headers"] = [{"header":k, "value":v} for k,v in data["headers"].items()]
-
-    r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/update_file?token={self.__token}", json=data, verify=self.__verify)
-    return r.status_code == 200
-
-  def dns(self) -> List[DnsRecord]:
-    """
-    Returns a dictionary containing the DNS data.
-    """
-    r = requests.get(f"{self.__protocol}://{self.__host}:{self.__port}/api/get_dns?token={self.__token}", verify=self.__verify)
-    return [DnsRecord(**d) for d in r.json()]
-
-  def update_dns(self, dns: List[DnsRecord]) -> bool:
-    """
-    Updates the DNS data on remote.
-    """
-    r = requests.post(f"{self.__protocol}://{self.__host}:{self.__port}/api/update_dns?token={self.__token}", json={"records":[d.model_dump() for d in dns]}, verify=self.__verify)
-    return r.status_code == 200
-
-  def add_dns(self, subsubdomain: str, dnstype: Union[int, str], value: str) -> bool:
-    """
-    Adds a DNS record to the remote.
-    """
-    dns_types = ["A", "AAAA", "CNAME", "TXT"]
-    records = self.dns()
-
-    # if dns entry already exists for same subsubdomain and dnstype, update it
-    # otherwise, add a new entry
-    for record in records:
-      if record.domain == subsubdomain and record.type == dnstype:
-        record.value = value
+        Returns:
+            True if the record was added successfully, False otherwise.
+        """
+        records = self.dns()
+        records.append(DnsRecord(type=record_type, domain=domain, value=value))
         return self.update_dns(records)
 
-    if type(dnstype) == str:
-      dnstype = dns_types.index(dnstype)
-      if dnstype == -1:
-        raise ValueError(f"Invalid DNS type: {dnstype}. Must be one of {dns_types}")
-    elif type(dnstype) == int and (dnstype < 0 or dnstype > len(dns_types)):
-      raise ValueError(f"Invalid DNS type: {dnstype}. Must be between 0 and {len(dns_types)-1}")
+    def remove_dns(self, domain: str, record_type: str | None = None) -> bool:
+        """Remove DNS records matching the given criteria.
 
-    records.append(DnsRecord(**{"domain":subsubdomain, "type":dnstype, "value":value}))
+        Args:
+            domain: Domain name to match.
+            record_type: Optional record type to match. If not provided,
+                        all records for the domain are removed.
 
-    return self.update_dns(records)
+        Returns:
+            True if any records were removed successfully, False otherwise.
+        """
+        records = self.dns()
+        if record_type:
+            filtered = [
+                r for r in records if not (r.domain == domain and r.type == record_type)
+            ]
+        else:
+            filtered = [r for r in records if r.domain != domain]
+        return self.update_dns(filtered)
+
+    # -------------------------------------------------------------------------
+    # Files Operations (FileTree)
+    # -------------------------------------------------------------------------
+
+    def files(self) -> dict[str, Response]:
+        """Get all response files for this session.
+
+        Returns:
+            Dictionary mapping file paths to Response objects.
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        r = requests.get(
+            f"{self._base_url()}/api/v2/files",
+            headers=self._auth_headers(),
+            verify=self.__verify,
+        )
+        r.raise_for_status()
+        return {k: Response(**v) for k, v in r.json().items()}
+
+    def update_files(self, files: dict[str, Response]) -> bool:
+        """Update all response files for this session.
+
+        Args:
+            files: Dictionary mapping file paths to Response objects.
+
+        Returns:
+            True if the update was successful, False otherwise.
+        """
+        r = requests.put(
+            f"{self._base_url()}/api/v2/files",
+            headers=self._auth_headers(),
+            json={k: v.model_dump() for k, v in files.items()},
+            verify=self.__verify,
+        )
+        return r.status_code == 200
+
+    def get_file(self, path: str) -> Response:
+        """Get a single response file by path.
+
+        Args:
+            path: The file path to retrieve.
+
+        Returns:
+            The Response object for the given path.
+
+        Raises:
+            requests.HTTPError: If the file is not found or request fails.
+        """
+        r = requests.get(
+            f"{self._base_url()}/api/v2/files/{path}",
+            headers=self._auth_headers(),
+            verify=self.__verify,
+        )
+        r.raise_for_status()
+        return Response(**r.json())
+
+    def set_file(
+        self,
+        path: str,
+        body: str | bytes,
+        status_code: int = 200,
+        headers: list[Header] | None = None,
+    ) -> bool:
+        """Set or update a single response file.
+
+        Args:
+            path: The file path to set.
+            body: The response body (will be base64 encoded if bytes).
+            status_code: HTTP status code to return.
+            headers: List of headers to include in the response.
+
+        Returns:
+            True if the file was set successfully, False otherwise.
+        """
+        all_files = self.files()
+
+        if isinstance(body, bytes):
+            raw = base64.b64encode(body).decode("utf-8")
+        else:
+            raw = base64.b64encode(body.encode("utf-8")).decode("utf-8")
+
+        all_files[path] = Response(
+            raw=raw,
+            headers=headers or [],
+            status_code=status_code,
+        )
+        return self.update_files(all_files)
+
+    # -------------------------------------------------------------------------
+    # Request Operations
+    # -------------------------------------------------------------------------
+
+    def list_requests(
+        self, limit: int = 100, offset: int = 0
+    ) -> list[AnyRequest]:
+        """List captured requests with pagination.
+
+        Args:
+            limit: Maximum number of requests to return.
+            offset: Number of requests to skip.
+
+        Returns:
+            List of request objects.
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        r = requests.get(
+            f"{self._base_url()}/api/v2/requests",
+            params={"limit": limit, "offset": offset},
+            headers=self._auth_headers(),
+            verify=self.__verify,
+        )
+        r.raise_for_status()
+        return [self._parse_request(req) for req in r.json().get("requests", [])]
+
+    def get_request(
+        self, filter_func: Callable[[AnyRequest], bool] | None = None
+    ) -> AnyRequest:
+        """Get a single request, optionally filtered.
+
+        Blocks until a request matching the filter is available. If no filter
+        is provided, returns the next available request.
+
+        Args:
+            filter_func: Optional function to filter requests.
+
+        Returns:
+            The first request matching the filter.
+        """
+        # First check the queue for matching requests
+        for i, req in enumerate(self.__request_queue):
+            if filter_func is None or filter_func(req):
+                return self.__request_queue.pop(i)
+
+        # Wait for new requests
+        while True:
+            self.__request_event.wait()
+            self.__request_event.clear()
+
+            for i, req in enumerate(self.__request_queue):
+                if filter_func is None or filter_func(req):
+                    return self.__request_queue.pop(i)
+
+    def delete_request(self, request_id: str) -> bool:
+        """Delete a single request by ID.
+
+        Args:
+            request_id: The ID of the request to delete.
+
+        Returns:
+            True if the request was deleted successfully, False otherwise.
+        """
+        r = requests.delete(
+            f"{self._base_url()}/api/v2/requests/{request_id}",
+            headers=self._auth_headers(),
+            verify=self.__verify,
+        )
+        return r.status_code == 200
+
+    def delete_all_requests(self) -> bool:
+        """Delete all captured requests for this session.
+
+        Returns:
+            True if all requests were deleted successfully, False otherwise.
+        """
+        r = requests.delete(
+            f"{self._base_url()}/api/v2/requests",
+            headers=self._auth_headers(),
+            verify=self.__verify,
+        )
+        return r.status_code == 200
+
+    # -------------------------------------------------------------------------
+    # Request Sharing
+    # -------------------------------------------------------------------------
+
+    def share_request(self, request_id: str) -> str:
+        """Create a share token for a request.
+
+        Args:
+            request_id: The ID of the request to share.
+
+        Returns:
+            A share token that can be used to access the request without authentication.
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        r = requests.post(
+            f"{self._base_url()}/api/v2/requests/{request_id}/share",
+            headers=self._auth_headers(),
+            verify=self.__verify,
+        )
+        r.raise_for_status()
+        return r.json()["share_token"]
+
+    def get_shared_request(self, share_token: str) -> AnyRequest:
+        """Get a request by its share token.
+
+        This method does not require authentication.
+
+        Args:
+            share_token: The share token for the request.
+
+        Returns:
+            The shared request object.
+
+        Raises:
+            requests.HTTPError: If the token is invalid or expired.
+        """
+        r = requests.get(
+            f"{self._base_url()}/api/v2/requests/shared/{share_token}",
+            verify=self.__verify,
+        )
+        r.raise_for_status()
+        return self._parse_request(r.json())
+
+    # -------------------------------------------------------------------------
+    # Request Filters
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def HTTP_FILTER(request: AnyRequest) -> bool:
+        """Filter for HTTP requests.
+
+        Args:
+            request: The request to check.
+
+        Returns:
+            True if the request is an HTTP request.
+        """
+        return isinstance(request, HttpRequest)
+
+    @staticmethod
+    def DNS_FILTER(request: AnyRequest) -> bool:
+        """Filter for DNS requests.
+
+        Args:
+            request: The request to check.
+
+        Returns:
+            True if the request is a DNS request.
+        """
+        return isinstance(request, DnsRequest)
+
+    @staticmethod
+    def SMTP_FILTER(request: AnyRequest) -> bool:
+        """Filter for SMTP requests.
+
+        Args:
+            request: The request to check.
+
+        Returns:
+            True if the request is an SMTP request.
+        """
+        return isinstance(request, SmtpRequest)
+
+    @staticmethod
+    def TCP_FILTER(request: AnyRequest) -> bool:
+        """Filter for TCP requests.
+
+        Args:
+            request: The request to check.
+
+        Returns:
+            True if the request is a TCP request.
+        """
+        return isinstance(request, TcpRequest)
+
+    def get_http_request(self) -> HttpRequest:
+        """Get the next HTTP request.
+
+        Blocks until an HTTP request is available.
+
+        Returns:
+            The next HTTP request.
+        """
+        return self.get_request(Requestrepo.HTTP_FILTER)  # type: ignore
+
+    def get_dns_request(self) -> DnsRequest:
+        """Get the next DNS request.
+
+        Blocks until a DNS request is available.
+
+        Returns:
+            The next DNS request.
+        """
+        return self.get_request(Requestrepo.DNS_FILTER)  # type: ignore
+
+    def get_smtp_request(self) -> SmtpRequest:
+        """Get the next SMTP request.
+
+        Blocks until an SMTP request is available.
+
+        Returns:
+            The next SMTP request.
+        """
+        return self.get_request(Requestrepo.SMTP_FILTER)  # type: ignore
+
+    def get_tcp_request(self) -> TcpRequest:
+        """Get the next TCP request.
+
+        Blocks until a TCP request is available.
+
+        Returns:
+            The next TCP request.
+        """
+        return self.get_request(Requestrepo.TCP_FILTER)  # type: ignore
+
+    # -------------------------------------------------------------------------
+    # WebSocket Operations
+    # -------------------------------------------------------------------------
+
+    def _connect_websocket(self) -> None:
+        """Connect to the WebSocket.
+
+        Raises:
+            Exception: If the WebSocket connection fails.
+        """
+        ws_protocol = "wss" if self.__protocol == "https" else "ws"
+        self.__websocket = connect(
+            f"{ws_protocol}://{self.__host}:{self.__port}/api/v2/ws"
+        )
+
+        # Send connect command
+        self.__websocket.send(json.dumps({"cmd": "connect", "token": self.__token}))
+
+        # Wait for connected response
+        msg = json.loads(self.__websocket.recv())
+        if msg.get("cmd") == "error":
+            raise Exception(f"WebSocket error: {msg.get('message')}")
+
+    def _ws_loop(self) -> None:
+        """Internal WebSocket message loop."""
+        while self.__ws_running and self.__websocket:
+            try:
+                raw_msg = self.__websocket.recv()
+                msg = json.loads(raw_msg)
+                cmd = msg.get("cmd")
+
+                if cmd == "request":
+                    request = self._parse_request(msg.get("data", {}))
+                    self.__request_queue.append(request)
+                    self.__request_event.set()
+                    self.on_request(request)
+                elif cmd == "requests":
+                    # Handle batch of historical requests
+                    for req_data in msg.get("data", []):
+                        request = self._parse_request(req_data)
+                        self.__request_queue.append(request)
+                        self.__request_event.set()
+                        self.on_request(request)
+                elif cmd == "pong":
+                    pass
+                elif cmd == "deleted":
+                    self.on_deleted(msg.get("data", {}).get("id"))
+                elif cmd == "cleared":
+                    self.on_cleared()
+
+            except Exception:
+                if self.__ws_running:
+                    self.__ws_running = False
+                break
+
+    def on_request(self, request: AnyRequest) -> None:
+        """Called when a new request is received.
+
+        Override this method in a subclass to handle incoming requests.
+
+        Args:
+            request: The received request object.
+        """
+        pass
+
+    def on_deleted(self, request_id: str | None) -> None:
+        """Called when a request is deleted.
+
+        Override this method in a subclass to handle deletion events.
+
+        Args:
+            request_id: The ID of the deleted request.
+        """
+        pass
+
+    def on_cleared(self) -> None:
+        """Called when all requests are cleared.
+
+        Override this method in a subclass to handle clear events.
+        """
+        pass
+
+    def await_requests(self) -> None:
+        """Start listening for real-time requests via WebSocket.
+
+        This method connects to the WebSocket and blocks until the
+        connection is closed. Override `on_request` to handle incoming
+        requests.
+
+        Example:
+            class MyRepo(Requestrepo):
+                def on_request(self, req):
+                    print(f"Got {req.type} request")
+
+            repo = MyRepo()
+            repo.await_requests()
+        """
+        self._connect_websocket()
+        self.__ws_running = True
+        self._ws_loop()
+
+    def start_requests(self) -> None:
+        """Start listening for requests in a background thread.
+
+        This method is non-blocking. Use `stop_requests` to stop listening.
+
+        Example:
+            repo = Requestrepo()
+            repo.start_requests()
+            # Do other work...
+            request = repo.get_http_request()
+            repo.stop_requests()
+        """
+        self._connect_websocket()
+        self.__ws_running = True
+        self.__ws_thread = threading.Thread(target=self._ws_loop, daemon=True)
+        self.__ws_thread.start()
+
+    def stop_requests(self) -> None:
+        """Stop listening for requests.
+
+        Closes the WebSocket connection and stops the background thread
+        if running.
+        """
+        self.__ws_running = False
+        if self.__websocket:
+            try:
+                self.__websocket.close()
+            except Exception:
+                pass
+            self.__websocket = None
+        if self.__ws_thread:
+            self.__ws_thread.join(timeout=1.0)
+            self.__ws_thread = None
+
+    def ping(self) -> bool:
+        """Send a ping to the WebSocket server.
+
+        Returns:
+            True if the pong was received, False otherwise.
+        """
+        if not self.__websocket:
+            return False
+        try:
+            self.__websocket.send(json.dumps({"cmd": "ping"}))
+            return True
+        except Exception:
+            return False
 
 
-  def remove_dns(self, subsubdomain: str, dnstype: Union[int, str, None]) -> bool:
-    """
-    Removes a DNS record from the remote.
-    """
-    dns_types = ["A", "AAAA", "CNAME", "TXT"]
-
-    records = self.dns()
-
-    if type(dnstype) == str:
-      dnstype = dns_types.index(dnstype)
-      if dnstype == -1:
-        raise ValueError(f"Invalid DNS type: {dnstype}. Must be one of {dns_types}")
-    elif type(dnstype) == int and (dnstype < 0 or dnstype > len(dns_types)):
-      raise ValueError(f"Invalid DNS type: {dnstype}. Must be between 0 and {len(dns_types)-1}")
-
-    prev_len = len(records)
-
-    records = [record for record in records if record["domain"] != subsubdomain and (dnstype == None or record["type"] != dnstype)]
-
-    if len(records) == prev_len:
-      return False
-
-    return self.update_dns(records)
-
-
-RequestRepo = Requestrepo
-requestrepo = Requestrepo
+__all__ = [
+    "Requestrepo",
+    "HttpRequest",
+    "DnsRequest",
+    "SmtpRequest",
+    "TcpRequest",
+    "DnsRecord",
+    "Header",
+    "Response",
+    "AnyRequest",
+]

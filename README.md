@@ -1,6 +1,10 @@
-# requestrepo Python client
+# requestrepo
 
-Python bindings to automate requestrepo.com
+[![PyPI](https://img.shields.io/pypi/v/requestrepo)](https://pypi.org/project/requestrepo/)
+[![Python](https://img.shields.io/pypi/pyversions/requestrepo)](https://pypi.org/project/requestrepo/)
+[![License](https://img.shields.io/pypi/l/requestrepo)](https://github.com/adrgs/requestrepo/blob/main/LICENSE)
+
+Python client library for [requestrepo](https://requestrepo.com) - an HTTP/DNS/SMTP/TCP request analysis tool for security researchers and developers.
 
 ## Installation
 
@@ -8,94 +12,313 @@ Python bindings to automate requestrepo.com
 pip install requestrepo
 ```
 
-## Basic Usage
-
-**Instantiate the `Requestrepo` class:**
-
-```python
-from requestrepo import Requestrepo  # Requestrepo, RequestRepo and requestrepo are accepted imports
-
-client = Requestrepo() # new token printed to console
-client = Requestrepo("your-token-here")
-```
-
-or via environment variables:
-
-```bash
-REQUESTREPO_TOKEN=token python your_script.py
-```
-
-## Examples
-
-**Example 1: Async request retrieval via `on_request`**
+## Quick Start
 
 ```python
 from requestrepo import Requestrepo
 
-def on_request(request_data):
-   print("New Request Received:", request_data)
+# Create a new session
+repo = Requestrepo()
+print(f"Send requests to: {repo.subdomain}.{repo.domain}")
 
-client = Requestrepo(token="your-token-here")
+# Start listening for requests
+repo.start_requests()
 
-print(client.subdomain) # abcd1234
-print(client.domain) # abcd1234.requestrepo.com
+# Wait for and process an HTTP request
+request = repo.get_http_request()
+print(f"Received {request.method} {request.path} from {request.ip}")
 
-client.await_requests()
+# Clean up
+repo.stop_requests()
 ```
 
-**Example 2: Synchronous request retrieval**
+## Features
+
+- Capture and inspect HTTP requests with full headers, body, and metadata
+- Monitor DNS queries to custom subdomains
+- Capture SMTP emails sent to your domain
+- Capture raw TCP connections
+- Define custom HTTP responses with headers and status codes
+- Set custom DNS records (A, AAAA, CNAME, TXT)
+- Share individual requests via secure tokens
+- Real-time WebSocket streaming for instant notifications
+
+## API Reference
+
+### Session Creation
 
 ```python
 from requestrepo import Requestrepo
 
-client = Requestrepo(token="your_api_token")
+# Basic usage (public instance)
+repo = Requestrepo()
 
-print(client.subdomain) # abcd1234
-print(client.domain) # abcd1234.requestrepo.com
+# With admin token (for protected instances)
+repo = Requestrepo(admin_token="your-admin-token")
 
-# Get the latest request (blocks until one is received)
-new_request = client.get_request()
-print("Latest Request:", new_request)
+# With existing session token
+repo = Requestrepo(token="existing-jwt-token")
+
+# Custom instance
+repo = Requestrepo(
+    host="your-instance.com",
+    port=443,
+    protocol="https",
+    verify=True  # SSL verification
+)
+
+# Access session info
+print(repo.subdomain)  # e.g., "abc123"
+print(repo.domain)     # e.g., "requestrepo.com"
+print(repo.token)      # JWT token for this session
 ```
 
-**Example 3: Retrieve old requests**
-
-You can iterate over all requests that are stored on the server:
+### DNS Operations
 
 ```python
-from requestrepo import Requestrepo
+# Add DNS records
+repo.add_dns("test", "A", "1.2.3.4")
+repo.add_dns("mail", "AAAA", "2001:db8::1")
+repo.add_dns("www", "CNAME", "example.com")
+repo.add_dns("_dmarc", "TXT", "v=DMARC1; p=none")
 
-client = Requestrepo(token="your_api_token")
+# List all DNS records
+records = repo.dns()
+for record in records:
+    print(f"{record.domain} {record.type} {record.value}")
 
-for request in client.get_old_requests():
-    print("Request:", request)
+# Remove DNS records
+repo.remove_dns("test")           # Remove all records for "test"
+repo.remove_dns("test", "A")      # Remove only A records for "test"
 
-client.delete_all_requests() # clear all requests on the server
+# Replace all DNS records
+from requestrepo import DnsRecord
+repo.update_dns([
+    DnsRecord(type="A", domain="@", value="1.2.3.4"),
+    DnsRecord(type="TXT", domain="@", value="hello world"),
+])
 ```
 
-**Example 4: Update HTTP response**
+### Custom HTTP Responses
 
-You can update the response of a request by calling `update_http` method:
+Configure what responses are returned when HTTP requests hit your subdomain:
 
 ```python
-from requestrepo import Requestrepo # pip install requestrepo
+# Set a simple HTML response
+repo.set_file("index.html", "<h1>Hello World</h1>", status_code=200)
 
-client = Requestrepo(token="your_api_token")
+# Set a JSON response with custom headers
+from requestrepo import Header
+repo.set_file(
+    "api/data.json",
+    '{"status": "ok"}',
+    status_code=200,
+    headers=[
+        Header(header="Content-Type", value="application/json"),
+        Header(header="X-Custom-Header", value="custom-value"),
+    ]
+)
 
-print(client.subdomain) # abcd1234
-print(client.domain) # abcd1234.requestrepo.com
+# Set binary content
+repo.set_file("image.png", open("local.png", "rb").read())
 
-client.update_http(raw=b"hello world")
+# List all configured files
+files = repo.files()
+for path, response in files.items():
+    print(f"{path}: {response.status_code}")
 
-# Get the latest request (blocks until one is received)
-new_request = client.get_request()
-print("Latest Request:", new_request)
+# Get a specific file
+response = repo.get_file("index.html")
 ```
 
-## Contributing
+### Request Management
 
-Contributions are welcome! Please submit a pull request or open an issue if you have any ideas or suggestions.
+```python
+# List captured requests
+requests = repo.list_requests(limit=100, offset=0)
+for req in requests:
+    print(f"{req.type}: {req.ip} at {req.date}")
+
+# Delete a specific request
+repo.delete_request(requests[0].id)
+
+# Delete all requests
+repo.delete_all_requests()
+```
+
+### Request Sharing
+
+Share individual requests with others without giving access to your full session:
+
+```python
+# Get a share token for a request
+requests = repo.list_requests(limit=1)
+share_token = repo.share_request(requests[0].id)
+print(f"Share URL: https://requestrepo.com/r/{share_token}")
+
+# Anyone can view the shared request (no auth required)
+shared_request = repo.get_shared_request(share_token)
+```
+
+### Real-time WebSocket Streaming
+
+#### Blocking Mode
+
+Process requests as they arrive in a blocking loop:
+
+```python
+class MyRepo(Requestrepo):
+    def on_request(self, request):
+        print(f"Got {request.type} request from {request.ip}")
+        if request.type == "http":
+            print(f"  {request.method} {request.path}")
+
+    def on_deleted(self, request_id):
+        print(f"Request {request_id} was deleted")
+
+    def on_cleared(self):
+        print("All requests were cleared")
+
+repo = MyRepo()
+repo.await_requests()  # Blocks forever
+```
+
+#### Background Mode
+
+Process requests in a background thread while doing other work:
+
+```python
+repo = Requestrepo()
+repo.start_requests()  # Start listening in background
+
+# Do other work...
+# Then wait for specific requests:
+http_req = repo.get_http_request()  # Blocks until HTTP request arrives
+dns_req = repo.get_dns_request()    # Blocks until DNS request arrives
+
+# Or use custom filters:
+post_req = repo.get_request(lambda r: r.type == "http" and r.method == "POST")
+
+# Stop listening when done
+repo.stop_requests()
+```
+
+#### Built-in Filters
+
+```python
+# Filter by request type
+http_req = repo.get_request(Requestrepo.HTTP_FILTER)
+dns_req = repo.get_request(Requestrepo.DNS_FILTER)
+smtp_req = repo.get_request(Requestrepo.SMTP_FILTER)
+tcp_req = repo.get_request(Requestrepo.TCP_FILTER)
+
+# Or use convenience methods
+http_req = repo.get_http_request()
+dns_req = repo.get_dns_request()
+smtp_req = repo.get_smtp_request()
+tcp_req = repo.get_tcp_request()
+```
+
+## Request Types
+
+### HttpRequest
+
+```python
+request.id          # Unique identifier
+request.type        # "http"
+request.ip          # Source IP address
+request.country     # Two-letter country code (e.g., "US")
+request.date        # Unix timestamp
+request.method      # HTTP method (GET, POST, etc.)
+request.path        # Request path with query string
+request.http_version # e.g., "HTTP/1.1"
+request.headers     # Dict of headers
+request.body        # Request body as bytes
+request.raw         # Raw request data as bytes
+```
+
+### DnsRequest
+
+```python
+request.id          # Unique identifier
+request.type        # "dns"
+request.ip          # Source IP address
+request.country     # Two-letter country code
+request.port        # Source port
+request.date        # Unix timestamp
+request.query_type  # DNS query type (A, AAAA, TXT, etc.)
+request.domain      # Queried domain name
+request.reply       # DNS reply sent back
+request.raw         # Raw DNS query as bytes
+```
+
+### SmtpRequest
+
+```python
+request.id          # Unique identifier
+request.type        # "smtp"
+request.ip          # Source IP address
+request.country     # Two-letter country code
+request.date        # Unix timestamp
+request.command     # SMTP command
+request.data        # Email body
+request.subject     # Email subject
+request.from_addr   # Sender address
+request.to          # Recipient address
+request.cc          # CC recipients
+request.bcc         # BCC recipients
+request.raw         # Raw SMTP data as bytes
+```
+
+### TcpRequest
+
+```python
+request.id          # Unique identifier
+request.type        # "tcp"
+request.ip          # Source IP address
+request.country     # Two-letter country code
+request.port        # TCP port number
+request.date        # Unix timestamp
+request.raw         # Raw TCP data as bytes
+```
+
+## Complete Example
+
+```python
+from requestrepo import Requestrepo, Header
+
+class SecurityTester(Requestrepo):
+    def on_request(self, request):
+        if request.type == "http":
+            print(f"[HTTP] {request.method} {request.path}")
+            if "Authorization" in request.headers:
+                print(f"  Auth: {request.headers['Authorization']}")
+        elif request.type == "dns":
+            print(f"[DNS] {request.query_type} {request.domain}")
+        elif request.type == "smtp":
+            print(f"[SMTP] From: {request.from_addr} To: {request.to}")
+        elif request.type == "tcp":
+            print(f"[TCP] {len(request.raw)} bytes on port {request.port}")
+
+# Create session
+repo = SecurityTester()
+print(f"Your endpoint: {repo.subdomain}.{repo.domain}")
+
+# Configure DNS for testing
+repo.add_dns("@", "A", "127.0.0.1")
+repo.add_dns("canary", "TXT", "if-you-see-this-call-home")
+
+# Configure HTTP response
+repo.set_file("callback", '{"status":"received"}',
+    status_code=200,
+    headers=[Header(header="Content-Type", value="application/json")]
+)
+
+# Start listening
+print("Waiting for requests...")
+repo.await_requests()
+```
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE) for details.
