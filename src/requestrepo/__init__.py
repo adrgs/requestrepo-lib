@@ -238,7 +238,13 @@ class Requestrepo:
             verify=self.__verify,
         )
         r.raise_for_status()
-        return [DnsRecord(**d) for d in r.json().get("records", [])]
+        records = []
+        for d in r.json().get("records", []):
+            # Convert empty string to @ for root domain (user-friendly)
+            if d.get("domain") == "":
+                d["domain"] = "@"
+            records.append(DnsRecord(**d))
+        return records
 
     def update_dns(self, dns_records: list[DnsRecord]) -> bool:
         """Update all DNS records for this session.
@@ -249,10 +255,18 @@ class Requestrepo:
         Returns:
             True if the update was successful, False otherwise.
         """
+        # Convert @ to empty string for root domain (API convention)
+        records = []
+        for d in dns_records:
+            record = d.model_dump()
+            if record.get("domain") == "@":
+                record["domain"] = ""
+            records.append(record)
+
         r = requests.put(
             f"{self._base_url()}/api/v2/dns",
             headers=self._auth_headers(),
-            json={"records": [d.model_dump() for d in dns_records]},
+            json={"records": records},
             verify=self.__verify,
         )
         return r.status_code == 200
