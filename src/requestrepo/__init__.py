@@ -111,6 +111,12 @@ class Requestrepo:
 
         self.__token = token
 
+        # Connect WebSocket in background thread
+        self._connect_websocket()
+        self.__ws_running = True
+        self.__ws_thread = threading.Thread(target=self._ws_loop, daemon=True)
+        self.__ws_thread.start()
+
     def _extract_subdomain_from_token(self, token: str) -> str:
         """Extract the subdomain from a JWT token.
 
@@ -698,40 +704,6 @@ class Requestrepo:
         self._connect_websocket()
         self.__ws_running = True
         self._ws_loop()
-
-    def start_requests(self) -> None:
-        """Start listening for requests in a background thread.
-
-        This method is non-blocking. Use `stop_requests` to stop listening.
-
-        Example:
-            repo = Requestrepo()
-            repo.start_requests()
-            # Do other work...
-            request = repo.get_http_request()
-            repo.stop_requests()
-        """
-        self._connect_websocket()
-        self.__ws_running = True
-        self.__ws_thread = threading.Thread(target=self._ws_loop, daemon=True)
-        self.__ws_thread.start()
-
-    def stop_requests(self) -> None:
-        """Stop listening for requests.
-
-        Closes the WebSocket connection and stops the background thread
-        if running.
-        """
-        self.__ws_running = False
-        if self.__websocket:
-            try:
-                self.__websocket.close()
-            except Exception:
-                pass
-            self.__websocket = None
-        if self.__ws_thread:
-            self.__ws_thread.join(timeout=1.0)
-            self.__ws_thread = None
 
     def ping(self) -> bool:
         """Send a ping to the WebSocket server.

@@ -17,19 +17,13 @@ pip install requestrepo
 ```python
 from requestrepo import Requestrepo
 
-# Create a new session
+# Create a new session (automatically connects to WebSocket)
 repo = Requestrepo()
 print(f"Send requests to: {repo.subdomain}.{repo.domain}")
-
-# Start listening for requests
-repo.start_requests()
 
 # Wait for and process an HTTP request
 request = repo.get_http_request()
 print(f"Received {request.method} {request.path} from {request.ip}")
-
-# Clean up
-repo.stop_requests()
 ```
 
 ## Features
@@ -162,9 +156,26 @@ shared_request = repo.get_shared_request(share_token)
 
 ### Real-time WebSocket Streaming
 
-#### Blocking Mode
+The client automatically connects to WebSocket on initialization. You can wait for specific requests or use callbacks.
 
-Process requests as they arrive in a blocking loop:
+#### Waiting for Requests
+
+```python
+repo = Requestrepo()
+
+# Wait for specific request types (blocks until one arrives)
+http_req = repo.get_http_request()
+dns_req = repo.get_dns_request()
+smtp_req = repo.get_smtp_request()
+tcp_req = repo.get_tcp_request()
+
+# Or use custom filters:
+post_req = repo.get_request(lambda r: r.type == "http" and r.method == "POST")
+```
+
+#### Callback Mode
+
+Override `on_request` to handle requests as they arrive:
 
 ```python
 class MyRepo(Requestrepo):
@@ -180,27 +191,7 @@ class MyRepo(Requestrepo):
         print("All requests were cleared")
 
 repo = MyRepo()
-repo.await_requests()  # Blocks forever
-```
-
-#### Background Mode
-
-Process requests in a background thread while doing other work:
-
-```python
-repo = Requestrepo()
-repo.start_requests()  # Start listening in background
-
-# Do other work...
-# Then wait for specific requests:
-http_req = repo.get_http_request()  # Blocks until HTTP request arrives
-dns_req = repo.get_dns_request()    # Blocks until DNS request arrives
-
-# Or use custom filters:
-post_req = repo.get_request(lambda r: r.type == "http" and r.method == "POST")
-
-# Stop listening when done
-repo.stop_requests()
+repo.await_requests()  # Blocks forever, calls on_request for each
 ```
 
 #### Built-in Filters
