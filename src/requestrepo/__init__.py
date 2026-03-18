@@ -43,6 +43,7 @@ from .models import (
     RequestType,
     Response,
     ResponseFile,
+    SmtpAttachment,
     SmtpRequest,
     TcpRequest,
 )
@@ -391,6 +392,22 @@ class RequestRepo:
             return True
 
         return self.wait_for_request(timeout=timeout, match=predicate)  # type: ignore[return-value]
+
+    def wait_for_email(
+        self,
+        timeout: float | None = 60,
+        *,
+        subject: str | None = None,
+        sender: str | None = None,
+        match: Callable[["SmtpRequest"], bool] | None = None,
+    ) -> "SmtpRequest":
+        """Wait for an email. Alias for wait_for_smtp().
+
+        Uses 'email' instead of 'smtp' for clarity with AI agents.
+        """
+        return self.wait_for_smtp(
+            timeout=timeout, subject=subject, sender=sender, match=match
+        )
 
     def wait_for_tcp(
         self,
@@ -876,6 +893,7 @@ __all__ = [
     "Request",
     "HttpRequest",
     "DnsRequest",
+    "SmtpAttachment",
     "SmtpRequest",
     "TcpRequest",
     "AnyRequest",

@@ -152,6 +152,17 @@ class DnsRequest(Request):
         return f"DnsRequest({self.query_type} {self.domain} from {self.ip})"
 
 
+class SmtpAttachment(BaseModel):
+    """An email attachment."""
+    filename: str
+    content_type: str
+    size: int
+    content: bytes  # decoded from base64 by Pydantic
+
+    def __repr__(self) -> str:
+        return f"SmtpAttachment({self.filename!r}, {self.content_type}, {self.size} bytes)"
+
+
 class SmtpRequest(Request):
     """An SMTP email captured by requestrepo.
 
@@ -169,6 +180,63 @@ class SmtpRequest(Request):
     to: Optional[str] = None
     cc: Optional[str] = None
     bcc: Optional[str] = None
+    text_body: Optional[str] = None
+    html_body: Optional[str] = None
+    attachments: list[SmtpAttachment] = Field(default_factory=list)
+
+    @property
+    def text(self) -> str | None:
+        """Plain text email body.
+
+        Returns text_body from server if available, otherwise
+        falls back to client-side MIME parsing of the data field.
+        """
+        if self.text_body is not None:
+            return self.text_body
+        if self.data:
+            return self._parse_mime_text()
+        return None
+
+    @property
+    def html(self) -> str | None:
+        """HTML email body.
+
+        Returns html_body from server if available, otherwise
+        falls back to client-side MIME parsing of the data field.
+        """
+        if self.html_body is not None:
+            return self.html_body
+        if self.data:
+            return self._parse_mime_html()
+        return None
+
+    def _parse_mime_text(self) -> str | None:
+        """Fallback: parse text/plain from MIME data."""
+        import email as email_mod
+        msg = email_mod.message_from_string(self.data or "")
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        return payload.decode("utf-8", errors="replace")
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                return payload.decode("utf-8", errors="replace")
+        return None
+
+    def _parse_mime_html(self) -> str | None:
+        """Fallback: parse text/html from MIME data."""
+        import email as email_mod
+        msg = email_mod.message_from_string(self.data or "")
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        return payload.decode("utf-8", errors="replace")
+        return None
 
     def __repr__(self) -> str:
         parts = ["SmtpRequest("]
@@ -284,6 +352,7 @@ __all__ = [
     "Request",
     "HttpRequest",
     "DnsRequest",
+    "SmtpAttachment",
     "SmtpRequest",
     "TcpRequest",
     "AnyRequest",
