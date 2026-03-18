@@ -1,190 +1,294 @@
-"""Data models for requestrepo v2 API.
+"""Data models for requestrepo v3 API.
 
-This module provides Pydantic models for all request types, DNS records,
-and HTTP response configurations used by the requestrepo API.
+Pydantic models for all request types, DNS records, and HTTP response
+configurations. Fields are kept raw from the backend wherever possible.
 """
 
-from typing import Optional
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 
-class HttpRequest(BaseModel):
-    """HTTP request captured by requestrepo.
+# =============================================================================
+# Enums
+# =============================================================================
 
-    Attributes:
-        id: Unique identifier for the request.
-        type: Request type, always "http".
-        raw: Raw request data as bytes.
-        uid: Session identifier.
-        ip: Source IP address.
-        country: Two-letter country code from IP geolocation.
-        date: Unix timestamp of when the request was received.
-        method: HTTP method (GET, POST, etc.).
-        path: Request path including query string.
-        http_version: HTTP version (e.g., "HTTP/1.1").
-        headers: Dictionary of HTTP headers.
-        body: Request body as bytes, if present.
+
+class RequestType(str, Enum):
+    """Type of captured request."""
+
+    HTTP = "http"
+    DNS = "dns"
+    SMTP = "smtp"
+    TCP = "tcp"
+
+
+class DnsRecordType(str, Enum):
+    """Supported DNS record types."""
+
+    A = "A"
+    AAAA = "AAAA"
+    CNAME = "CNAME"
+    TXT = "TXT"
+
+
+# =============================================================================
+# Request Models
+# =============================================================================
+
+
+class Request(BaseModel):
+    """Base class for all captured requests.
+
+    All fields come raw from the backend. Check ``.type`` or use
+    ``isinstance()`` to determine the specific subclass.
     """
 
     id: str = Field(..., alias="_id")
-    type: str
+    type: RequestType
     raw: bytes
     uid: str
     ip: str
+    port: Optional[int] = None
     country: Optional[str] = None
     date: int
-    method: str
-    path: str
-    http_version: Optional[str] = None
-    headers: dict[str, str]
-    body: Optional[bytes] = None
 
     model_config = {"populate_by_name": True}
 
+    @property
+    def timestamp(self) -> datetime:
+        """Request time as a timezone-aware UTC datetime."""
+        return datetime.fromtimestamp(self.date, tz=timezone.utc)
 
-class DnsRequest(BaseModel):
-    """DNS request captured by requestrepo.
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(id={self.id!r}, ip={self.ip!r})"
 
-    Attributes:
-        id: Unique identifier for the request.
-        type: Request type, always "dns".
-        raw: Raw DNS query data as bytes.
-        uid: Session identifier.
-        ip: Source IP address.
-        country: Two-letter country code from IP geolocation.
-        port: Source port number.
-        date: Unix timestamp of when the request was received.
-        query_type: DNS query type (A, AAAA, CNAME, TXT, etc.).
-        domain: Queried domain name.
-        reply: DNS reply sent back, if any.
+    def __str__(self) -> str:
+        return repr(self)
+
+
+class HttpRequest(Request):
+    """An HTTP request captured by requestrepo.
+
+    Example::
+
+        req = repo.wait_for_http(timeout=30)
+        print(req.method, req.url)
+        print(req.headers.get("Authorization"))
+        data = req.json()
     """
 
-    id: str = Field(..., alias="_id")
-    type: str
-    raw: bytes
-    uid: str
-    ip: str
-    country: Optional[str] = None
-    port: Optional[int] = None
-    date: int
+    type: Literal[RequestType.HTTP] = RequestType.HTTP
+    method: str
+    path: str
+    query: Optional[str] = None
+    url: str = ""
+    protocol: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def body(self) -> bytes:
+        """Request body as bytes. Alias for ``.raw``."""
+        return self.raw
+
+    @property
+    def text(self) -> str:
+        """Request body decoded as UTF-8.
+
+        Raises:
+            UnicodeDecodeError: If the body is not valid UTF-8.
+        """
+        return self.raw.decode("utf-8")
+
+    def json(self) -> Any:
+        """Parse request body as JSON.
+
+        Raises:
+            ValueError: If the body is not valid JSON.
+        """
+        return json.loads(self.raw)
+
+    @property
+    def content_type(self) -> str | None:
+        """Shortcut for ``headers.get("Content-Type")``."""
+        return self.headers.get("Content-Type")
+
+    def __repr__(self) -> str:
+        path_display = self.path
+        if self.query:
+            path_display += self.query
+        return f"HttpRequest({self.method} {path_display} from {self.ip})"
+
+    def __str__(self) -> str:
+        lines = [f"{self.method} {self.path}{self.query or ''} {self.protocol}"]
+        for name, value in self.headers.items():
+            lines.append(f"{name}: {value}")
+        if self.raw:
+            lines.append("")
+            lines.append(self.raw.decode("utf-8", errors="replace")[:1000])
+        return "\n".join(lines)
+
+
+class DnsRequest(Request):
+    """A DNS query captured by requestrepo.
+
+    Example::
+
+        req = repo.wait_for_dns(timeout=30)
+        label = req.domain.split(".")[0]  # extract exfil data
+    """
+
+    type: Literal[RequestType.DNS] = RequestType.DNS
     query_type: str
     domain: str
     reply: Optional[str] = None
 
-    model_config = {"populate_by_name": True}
+    def __repr__(self) -> str:
+        return f"DnsRequest({self.query_type} {self.domain} from {self.ip})"
 
 
-class SmtpRequest(BaseModel):
-    """SMTP request captured by requestrepo.
+class SmtpRequest(Request):
+    """An SMTP email captured by requestrepo.
 
-    Attributes:
-        id: Unique identifier for the request.
-        type: Request type, always "smtp".
-        raw: Raw SMTP data as bytes.
-        uid: Session identifier.
-        ip: Source IP address.
-        country: Two-letter country code from IP geolocation.
-        date: Unix timestamp of when the request was received.
-        command: SMTP command received.
-        data: Email body data.
-        subject: Email subject line.
-        from_addr: Sender email address.
-        to: Recipient email address.
-        cc: CC recipients.
-        bcc: BCC recipients.
+    Example::
+
+        email = repo.wait_for_smtp(timeout=120)
+        print(email.subject, email.sender)
     """
 
-    id: str = Field(..., alias="_id")
-    type: str
-    raw: bytes
-    uid: str
-    ip: str
-    country: Optional[str] = None
-    date: int
+    type: Literal[RequestType.SMTP] = RequestType.SMTP
     command: str
     data: Optional[str] = None
     subject: Optional[str] = None
-    from_addr: Optional[str] = Field(None, alias="from")
+    sender: Optional[str] = Field(None, alias="from")
     to: Optional[str] = None
     cc: Optional[str] = None
     bcc: Optional[str] = None
 
-    model_config = {"populate_by_name": True}
+    def __repr__(self) -> str:
+        parts = ["SmtpRequest("]
+        if self.sender:
+            parts.append(f"from {self.sender}")
+        if self.subject:
+            parts.append(f"subj={self.subject!r}")
+        parts.append(f"from {self.ip})")
+        return " ".join(parts)
 
 
-class TcpRequest(BaseModel):
-    """TCP request captured by requestrepo.
+class TcpRequest(Request):
+    """A raw TCP connection captured by requestrepo.
 
-    Attributes:
-        id: Unique identifier for the request.
-        type: Request type, always "tcp".
-        raw: Raw TCP data as bytes.
-        uid: Session identifier.
-        ip: Source IP address.
-        country: Two-letter country code from IP geolocation.
-        port: TCP port number.
-        date: Unix timestamp of when the request was received.
+    Example::
+
+        req = repo.wait_for_tcp(timeout=30)
+        print(f"{len(req.raw)} bytes on port {req.server_port}")
     """
 
-    id: str = Field(..., alias="_id")
-    type: str
-    raw: bytes
-    uid: str
-    ip: str
-    country: Optional[str] = None
-    port: int
-    date: int
+    type: Literal[RequestType.TCP] = RequestType.TCP
+    server_port: int = Field(0, alias="port")
 
-    model_config = {"populate_by_name": True}
+    # Override port from base to avoid conflict —
+    # TcpRequest uses "port" from backend as server_port
+    port: Optional[int] = Field(None, exclude=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"TcpRequest({len(self.raw)} bytes on :{self.server_port}"
+            f" from {self.ip})"
+        )
+
+
+AnyRequest = Union[HttpRequest, DnsRequest, SmtpRequest, TcpRequest]
+"""Union type of all request subtypes."""
+
+
+# =============================================================================
+# Configuration Models
+# =============================================================================
 
 
 class DnsRecord(BaseModel):
-    """DNS record configuration for a session.
+    """A DNS record for a requestrepo session.
 
-    Attributes:
-        type: DNS record type (A, AAAA, CNAME, TXT).
-        domain: Domain or subdomain name.
-        value: Record value (IP address, hostname, or text).
+    Constructor follows zone-file order: domain, type, value.
+
+    Example::
+
+        DnsRecord(domain="*", record_type="A", value="1.2.3.4")
+        DnsRecord(domain="_verify", record_type="TXT", value="token=abc")
     """
 
-    type: str
     domain: str
+    record_type: str = Field(..., alias="type")
     value: str
+
+    model_config = {"populate_by_name": True}
+
+    def __repr__(self) -> str:
+        return f"DnsRecord({self.domain} {self.record_type} {self.value})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DnsRecord):
+            return NotImplemented
+        return (
+            self.domain == other.domain
+            and self.record_type == other.record_type
+            and self.value == other.value
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.domain, self.record_type, self.value))
 
 
 class Header(BaseModel):
-    """HTTP header for custom responses.
-
-    Attributes:
-        header: Header name.
-        value: Header value.
-    """
+    """HTTP header for custom responses."""
 
     header: str
     value: str
 
 
 class Response(BaseModel):
-    """Custom HTTP response configuration for the file tree.
-
-    Attributes:
-        raw: Base64 encoded response body.
-        headers: List of HTTP headers to include.
-        status_code: HTTP status code to return.
-    """
+    """Custom HTTP response configuration (internal wire format)."""
 
     raw: str
     headers: list[Header]
     status_code: int
 
 
+class ResponseFile(BaseModel):
+    """A custom HTTP response served at a URL path.
+
+    Returned by :meth:`RequestRepo.get_responses`. Use
+    :meth:`RequestRepo.set_response` to create/update responses.
+    """
+
+    path: str = ""
+    body: bytes = b""
+    status_code: int = 200
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def text(self) -> str:
+        """Body decoded as UTF-8."""
+        return self.body.decode("utf-8", errors="replace")
+
+
 __all__ = [
+    "RequestType",
+    "DnsRecordType",
+    "Request",
     "HttpRequest",
     "DnsRequest",
     "SmtpRequest",
     "TcpRequest",
+    "AnyRequest",
     "DnsRecord",
     "Header",
     "Response",
+    "ResponseFile",
 ]
