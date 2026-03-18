@@ -15,9 +15,12 @@ Quick start::
 
 import base64
 import json
+import logging
 import threading
 import time
 from typing import Any, Callable, Iterator, Union
+
+logger = logging.getLogger("requestrepo")
 
 import requests as http_lib
 from websockets.sync.client import connect
@@ -96,6 +99,7 @@ class RequestRepo:
         self.__request_queue: list[AnyRequest] = []
         self.__request_lock = threading.Lock()
         self.__request_event = threading.Event()
+        self.__pong_event = threading.Event()
 
         if not token:
             body: dict[str, Any] = {}
@@ -127,6 +131,10 @@ class RequestRepo:
             self.__subdomain = data["subdomain"]
         else:
             self.__subdomain = self._extract_subdomain(token)
+            if not self.__subdomain:
+                raise AuthError(
+                    "Invalid token: could not extract subdomain from JWT"
+                )
 
         self.__token = token
 
@@ -249,7 +257,9 @@ class RequestRepo:
         deadline = None if timeout is None else time.monotonic() + timeout
 
         while True:
-            # Check queue
+            # Ordering guarantee: we always check queue + ws_running
+            # AFTER waking from event.wait(). This ensures we never miss
+            # a disconnect signal even if it fires during wait().
             result = self._dequeue_match(match)
             if result is not None:
                 return result
@@ -257,7 +267,6 @@ class RequestRepo:
             if not self.__ws_running:
                 raise RequestRepoConnectionError("WebSocket disconnected")
 
-            # Calculate remaining time
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -839,9 +848,21 @@ class RequestRepo:
             raise AuthError(f"WebSocket auth failed: {msg.get('message')}")
 
     def _ws_loop(self) -> None:
-        """Internal WebSocket message loop (runs in daemon thread)."""
-        while self.__ws_running and self.__websocket:
+        """Internal WebSocket message loop with auto-reconnect.
+
+        Runs in a daemon thread. On disconnect, retries with exponential
+        backoff (1s, 2s, 4s, 8s, max 30s). Stops when close() is called.
+        """
+        backoff = 1.0
+        max_backoff = 30.0
+
+        while self.__ws_running:
             try:
+                if not self.__websocket:
+                    self._connect_websocket()
+                    backoff = 1.0  # Reset on successful connect
+                    logger.debug("WebSocket connected")
+
                 raw_msg = self.__websocket.recv()
                 msg = json.loads(raw_msg)
                 cmd = msg.get("cmd")
@@ -852,16 +873,38 @@ class RequestRepo:
                     for req_data in msg.get("data", []):
                         self._enqueue_request(req_data)
                 elif cmd == "pong":
-                    pass
-                elif cmd == "deleted":
-                    pass
-                elif cmd == "cleared":
-                    pass
-            except Exception:
-                if self.__ws_running:
-                    self.__ws_running = False
-                    self.__request_event.set()  # Wake up waiting threads
-                break
+                    self.__pong_event.set()
+
+            except Exception as e:
+                if not self.__ws_running:
+                    break
+                logger.debug("WebSocket error: %s, reconnecting in %ss", e, backoff)
+                self.__websocket = None
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+        self.__ws_running = False
+        self.__request_event.set()  # Wake up waiting threads
+
+    def ping(self, timeout: float = 5.0) -> bool:
+        """Check if WebSocket connection is alive.
+
+        Sends a ping and waits for pong response.
+
+        Args:
+            timeout: Seconds to wait for pong.
+
+        Returns:
+            True if pong received, False if timeout or disconnected.
+        """
+        if not self.__websocket or not self.__ws_running:
+            return False
+        try:
+            self.__pong_event.clear()
+            self.__websocket.send(json.dumps({"cmd": "ping"}))
+            return self.__pong_event.wait(timeout=timeout)
+        except Exception:
+            return False
 
     def _enqueue_request(self, data: dict) -> None:
         """Parse and add a request to the queue, then signal waiters."""
@@ -870,8 +913,8 @@ class RequestRepo:
             with self.__request_lock:
                 self.__request_queue.append(request)
             self.__request_event.set()
-        except (ValueError, Exception):
-            pass  # Skip unparseable requests
+        except Exception:
+            logger.warning("Failed to parse request: %s", data)
 
 
 __all__ = [
