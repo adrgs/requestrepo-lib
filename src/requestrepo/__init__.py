@@ -40,7 +40,6 @@ from .models import (
     DnsRecord,
     DnsRecordType,
     DnsRequest,
-    Header,
     HttpRequest,
     Request,
     RequestType,

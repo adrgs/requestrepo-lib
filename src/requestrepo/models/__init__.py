@@ -190,11 +190,14 @@ class SmtpRequest(Request):
 
         Returns text_body from server if available, otherwise
         falls back to client-side MIME parsing of the data field.
+        Result is cached after first access.
         """
         if self.text_body is not None:
             return self.text_body
         if self.data:
-            return self._parse_mime_text()
+            if not hasattr(self, "_cached_text"):
+                object.__setattr__(self, "_cached_text", self._parse_mime_part("text/plain"))
+            return self._cached_text
         return None
 
     @property
@@ -203,39 +206,31 @@ class SmtpRequest(Request):
 
         Returns html_body from server if available, otherwise
         falls back to client-side MIME parsing of the data field.
+        Result is cached after first access.
         """
         if self.html_body is not None:
             return self.html_body
         if self.data:
-            return self._parse_mime_html()
+            if not hasattr(self, "_cached_html"):
+                object.__setattr__(self, "_cached_html", self._parse_mime_part("text/html"))
+            return self._cached_html
         return None
 
-    def _parse_mime_text(self) -> str | None:
-        """Fallback: parse text/plain from MIME data."""
+    def _parse_mime_part(self, content_type: str) -> str | None:
+        """Extract a specific content type from MIME data."""
         import email as email_mod
+
         msg = email_mod.message_from_string(self.data or "")
         if msg.is_multipart():
             for part in msg.walk():
-                if part.get_content_type() == "text/plain":
+                if part.get_content_type() == content_type:
                     payload = part.get_payload(decode=True)
                     if payload:
                         return payload.decode("utf-8", errors="replace")
-        else:
+        elif msg.get_content_type() == content_type or content_type == "text/plain":
             payload = msg.get_payload(decode=True)
             if payload:
                 return payload.decode("utf-8", errors="replace")
-        return None
-
-    def _parse_mime_html(self) -> str | None:
-        """Fallback: parse text/html from MIME data."""
-        import email as email_mod
-        msg = email_mod.message_from_string(self.data or "")
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/html":
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        return payload.decode("utf-8", errors="replace")
         return None
 
     def __repr__(self) -> str:
